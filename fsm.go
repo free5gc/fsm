@@ -1,87 +1,136 @@
 package fsm
 
 import (
-	"errors"
 	"fmt"
+	"os"
+	"strings"
 )
 
-type State string
-type Event string
-type HandleFunc func(*FSM, Event, Args) error
-type FuncTable map[State]HandleFunc
+type EventType string
+type ArgsType map[string]interface{}
 
+type Callback func(*State, EventType, ArgsType)
+type Callbacks map[StateType]Callback
+
+// Transition defines a transition
+// that a Event is triggered at From state,
+// and transfer to To state after the Event
+type Transition struct {
+	Event EventType
+	From  StateType
+	To    StateType
+}
+
+type Transitions []Transition
+
+type eventKey struct {
+	Event EventType
+	From  StateType
+}
+
+// Entry/Exit event are defined by fsm package
 const (
-	EVENT_ENTRY Event = "ENTRY EVENT"
+	EntryEvent EventType = "Entry event"
+	ExitEvent  EventType = "Exit event"
 )
-
-type Args map[string]interface{}
 
 type FSM struct {
-	state     State
-	funcTable FuncTable
+	// transitions stores one transition for each event
+	transitions map[eventKey]Transition
+	// callbacks stores one callback function for one state
+	callbacks map[StateType]Callback
 }
 
-func NewFuncTable() (table FuncTable) {
-	table = make(map[State]HandleFunc)
-	return
-}
-
-func NewFSM(initState State, table FuncTable) (fsm *FSM, err error) {
-	fsm = new(FSM)
-
-	fsm.state = initState
-	fsm.funcTable = table
-	if _, ok := table[initState]; !ok {
-		return nil, errors.New("initial state is not valid")
+// NewFSM create a new FSM object then registers transitions and callbacks to it
+func NewFSM(transitions Transitions, callbacks Callbacks) (*FSM, error) {
+	fsm := &FSM{
+		transitions: make(map[eventKey]Transition),
+		callbacks:   make(map[StateType]Callback),
 	}
-	err = fsm.funcTable[fsm.state](fsm, EVENT_ENTRY, nil)
-	if err != nil {
-		return nil, err
+
+	allStates := make(map[StateType]bool)
+
+	for _, transition := range transitions {
+		key := eventKey{
+			Event: transition.Event,
+			From:  transition.From,
+		}
+		if _, ok := fsm.transitions[key]; ok {
+			return nil, fmt.Errorf("Duplicate transition: %+v", transition)
+		} else {
+			fsm.transitions[key] = transition
+			allStates[transition.From] = true
+			allStates[transition.To] = true
+		}
+	}
+
+	for state, callback := range callbacks {
+		if _, ok := allStates[state]; !ok {
+			return nil, fmt.Errorf("Unknown state: %+v", state)
+		} else {
+			fsm.callbacks[state] = callback
+		}
 	}
 	return fsm, nil
 }
 
-func (fsm *FSM) Current() State {
-	return fsm.state
-}
-
-func (fsm *FSM) Check(state State) bool {
-	return fsm.state == state
-}
-
-func (fsm *FSM) AddState(state State, callback HandleFunc) {
-	fsm.funcTable[state] = callback
-}
-
-func (fsm *FSM) SendEvent(event Event, args Args) (err error) {
-	err = fsm.funcTable[fsm.state](fsm, event, args)
-	return
-}
-
-/* args is for ENTRY params*/
-func (fsm *FSM) Transfer(trans State, args Args) error {
-	if _, ok := fsm.funcTable[trans]; !ok {
-		return fmt.Errorf("Fsm Tranfer Error : State %s is not exist", trans)
+// SendEvent triggers a callback with an event, and do transition after callback if need
+// There are 3 types of callback:
+//  - on exit callback: call when fsm leave one state, with ExitEvent event
+//  - event callback: call when user trigger a user-defined event
+//  - on entry callback: call when fsm enter one state, with EntryEvent event
+func (fsm *FSM) SendEvent(state *State, event EventType, args ArgsType) error {
+	key := eventKey{
+		From:  state.Current(),
+		Event: event,
 	}
-	if trans != fsm.state {
-		fsm.state = trans
-		err := fsm.funcTable[fsm.state](fsm, EVENT_ENTRY, args)
-		if err != nil {
+
+	if trans, ok := fsm.transitions[key]; ok {
+		// exit callback
+		if trans.From != trans.To {
+			fsm.callbacks[trans.From](state, ExitEvent, args)
+		}
+
+		// event callback
+		fsm.callbacks[trans.From](state, event, args)
+
+		// entry callback
+		if trans.From != trans.To {
+			state.Set(trans.To)
+			fsm.callbacks[trans.To](state, EntryEvent, args)
+		}
+		return nil
+	} else {
+		return fmt.Errorf("Unknown transition[From: %s, Event: %s]", state.Current(), event)
+	}
+}
+
+// ExportDot export fsm in dot format to outfile, which can be visualize by graphviz
+func ExportDot(fsm *FSM, outfile string) error {
+	dot := `digraph FSM {
+	rankdir=LR
+	size="100"
+    node[width=1 fixedsize=false shape=ellipse style=filled fillcolor="skyblue"]
+	`
+
+	for _, trans := range fsm.transitions {
+		link := fmt.Sprintf("\t%s -> %s [label=\"%s\"]", trans.From, trans.To, trans.Event)
+		dot = dot + "\r\n" + link
+	}
+
+	dot = dot + "\r\n}\n"
+
+	if !strings.HasSuffix(outfile, ".dot") {
+		outfile = fmt.Sprintf("%s.dot", outfile)
+	}
+
+	if file, err := os.Create(outfile); err != nil {
+		return err
+	} else {
+		if _, err = file.WriteString(dot); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-func (fsm *FSM) AllStates() (states []State) {
-	for key := range fsm.funcTable {
-		states = append(states, key)
-	}
-	return
-}
-
-func (fsm *FSM) PrintStates() {
-	for key := range fsm.funcTable {
-		fmt.Println(key)
+		fmt.Printf("Output the FSM to \"%s\"\n", outfile)
+		return file.Close()
 	}
 }
